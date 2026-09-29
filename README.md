@@ -96,3 +96,18 @@ The endpoint should return JSON. It may return a queued job such as:
 Veylola exposes `GET /v1/video/capabilities` so the Android app can detect whether the self-hosted video engine is configured.
 
 This makes the API an adapter around your own video model; the model itself still needs to run on a machine with suitable GPU/CPU resources.
+
+
+## Advanced AI video generation
+
+The Veylola Android Video Studio can send richer generation requests to a configured video engine:
+
+- Self-hosted requests from 5–60 seconds
+- 9:16, 16:9 and 1:1 output sizes
+- style, camera and motion controls
+- negative prompts
+- optional seed, steps and guidance values
+- draft/standard/high quality hints
+- capability detection through `/v1/video/capabilities`
+
+The Render web service is an API routing layer; it does not provide a free GPU video model. For genuinely generative video, `LOCAL_VIDEO_URL` must point to a video-generation server with suitable hardware and an endpoint matching the adapter contract.

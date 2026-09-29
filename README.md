@@ -1,62 +1,77 @@
 # Veylola AI API
 
-ChatGPT-like backend for the Veylola Android app, hosted on Render.
+A self-hostable backend for the Veylola Android app.
 
-## Core API
+## Free / open-source mode
+
+The API can run without OpenAI or xAI keys by using an OpenAI-compatible local model server such as Ollama.
+
+Architecture:
+
+Veylola Android app → Veylola API → Ollama → open-source model
+
+Example environment:
+
+```env
+AI_PROVIDER=local
+AI_MODEL=llama3.2
+LOCAL_AI_URL=http://127.0.0.1:11434/v1
+```
+
+Install Ollama on the computer that will run the model, download an open-source model, then start Ollama. The Veylola API forwards chat requests to Ollama's OpenAI-compatible API.
+
+### Important
+
+A local API can avoid per-request OpenAI/xAI charges, but the computer still needs CPU/GPU/RAM and electricity. A free Render web service cannot magically provide unlimited GPU inference.
+
+## Endpoints
 
 - GET /health
 - GET /v1/capabilities
+- GET /v1/local/status
 - POST /chat
 - POST /v1/responses
 - POST /v1/files
 - POST /v1/vector-stores
-- POST /v1/vector-stores/:id/files
 - POST /image
 - POST /video
 - POST /music
+- POST /v1/grok/responses
 
-## Chat / Responses
+## Local chat
 
 POST /v1/responses:
 
+```json
 {
-  "input": "Explain quantum computing simply",
-  "web_search": true,
-  "stream": false
+  "input": "Explain electrical circuits simply"
 }
+```
 
-For multimodal input, send OpenAI Responses API input content objects in `input`.
+With local mode enabled, this becomes an OpenAI-compatible chat-completions request to the configured `LOCAL_AI_URL`.
 
-Use `previous_response_id` for multi-turn context. The API can also use OpenAI-hosted conversation state through stored Responses.
+Streaming is also supported.
 
-## Web search
+## Hosted mode
 
-Set `web_search: true`. Veylola adds OpenAI's built-in web_search tool.
+If you prefer OpenAI instead, set:
 
-## Files and knowledge
+```env
+AI_PROVIDER=openai
+AI_MODEL=gpt-5.6
+OPENAI_API_KEY=your_key
+```
 
-1. Upload a file with multipart/form-data to /v1/files using field `file`.
-2. Create a vector store with /v1/vector-stores.
-3. Add uploaded file IDs to the vector store.
-4. Call /v1/responses with `vector_store_ids: ["vs_..."]`.
+Grok remains separately available through `/v1/grok/responses` when `XAI_API_KEY` is configured.
+
+## Media
+
+The existing image, video and music routes can still use their configured providers. For a completely self-hosted media stack, add local adapters using `LOCAL_IMAGE_URL`, `LOCAL_VIDEO_URL`, and `LOCAL_MUSIC_URL`; the model server you choose must provide a compatible HTTP API.
 
 ## Security
 
-Set `VEYLOLA_API_KEY` in Render to require the Android app to authenticate. Keep `OPENAI_API_KEY` server-side only.
-
-A simple in-memory rate limiter is enabled. For multi-instance production deployments, replace it with Redis or another shared store.
+Set `VEYLOLA_API_KEY` before exposing the API publicly. Never put model-provider secret keys in the Android app.
 
 ## Render
 
-Build: `npm install`
-Start: `npm start`
-Health check: `/health`
-
-Environment variables:
-
-- OPENAI_API_KEY
-- AI_MODEL
-- VEYLOLA_API_KEY
-- RATE_LIMIT_PER_MINUTE
-- MUSIC_API_URL
-- MUSIC_API_KEY
+Render can host the API routing layer, but a normal free web service is not a free GPU server. For genuinely self-hosted inference, run the model server on your own computer or another machine with suitable hardware and point `LOCAL_AI_URL` at it.

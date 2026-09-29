@@ -85,3 +85,64 @@ supabase functions deploy music-generate
 ```
 
 For production, add authentication, rate limiting, quotas, logging, and usage billing before exposing the endpoints publicly.
+
+
+## Connect the Destiny AI mobile app
+
+The mobile app should call these HTTPS endpoints instead of putting provider API keys in the APK.
+
+### Base URL
+
+```text
+https://YOUR_PROJECT_REF.supabase.co/functions/v1
+```
+
+### React Native / Expo chat example
+
+```ts
+const API_BASE_URL =
+  "https://YOUR_PROJECT_REF.supabase.co/functions/v1";
+
+export async function askDestinyAI(message: string, previousResponseId?: string) {
+  const response = await fetch(`${API_BASE_URL}/destiny-ai`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message,
+      ...(previousResponseId
+        ? { previous_response_id: previousResponseId }
+        : {}),
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.error ?? "Destiny AI request failed");
+  }
+
+  return data;
+}
+```
+
+### Image example
+
+```ts
+const response = await fetch(`${API_BASE_URL}/image-generate`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    prompt: "A futuristic Nigerian city at night",
+    size: "1024x1024",
+    quality: "high",
+  }),
+});
+
+const data = await response.json();
+```
+
+### Security
+
+Do not put `OPENAI_API_KEY`, `VIDEO_API_KEY`, or `MUSIC_API_KEY` in the mobile app. Store provider secrets in Supabase Edge Function Secrets. For production, add user authentication, rate limits, quotas, logging, and abuse protection.

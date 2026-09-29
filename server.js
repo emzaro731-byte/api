@@ -494,14 +494,23 @@ app.post("/video", async (req, res) => {
   if (typeof prompt !== "string" || !prompt.trim()) return fail(res, 400, "prompt is required");
   const validSeconds = [4, 8, 12].includes(Number(seconds)) ? Number(seconds) : 8;
   try {
+    if (LOCAL_VIDEO_URL) {
+      const upstream = await fetchWithRetry(LOCAL_VIDEO_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: prompt.trim(), model, seconds: validSeconds, size })
+      });
+      const data = await readJson(upstream);
+      if (!upstream.ok) return fail(res, upstream.status, "Local video generation failed", data?.error?.message || data);
+      return res.status(upstream.status).json(data);
+    }
     const form = new FormData();
     form.append("model", model);
     form.append("prompt", prompt.trim());
     form.append("seconds", String(validSeconds));
     form.append("size", size);
-    const upstream = await fetch(OPENAI_URL + "/videos", {
+    const upstream = await openai("/videos", {
       method: "POST",
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY || ""}` },
       body: form
     });
     const data = await readJson(upstream);
@@ -509,7 +518,7 @@ app.post("/video", async (req, res) => {
     return res.status(202).json(data);
   } catch (e) {
     console.error(e);
-    return fail(res, 500, "Server error");
+    return fail(res, e.status || 500, e.message || "Server error");
   }
 });
 
@@ -520,11 +529,9 @@ app.post("/music", async (req, res) => {
   try {
     const upstream = await fetchWithRetry(LOCAL_MUSIC_URL || base, {
       method: "POST",
-      headers: LOCAL_MUSIC_URL ? { "Content-Type": "application/json" } : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify(req.body)
-    });
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      headers: LOCAL_MUSIC_URL
+        ? { "Content-Type": "application/json" }
+        : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify(req.body)
     });
     const data = await readJson(upstream);
@@ -532,7 +539,7 @@ app.post("/music", async (req, res) => {
     return res.status(202).json(data);
   } catch (e) {
     console.error(e);
-    return fail(res, 500, "Server error");
+    return fail(res, 500, e.message || "Server error");
   }
 });
 

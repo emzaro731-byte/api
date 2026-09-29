@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: veylola-ai-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: AI_MODEL
+        value: gpt-5.6
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MUSIC_API_URL
+        sync: false
+      - key: MUSIC_API_KEY
+        sync: false

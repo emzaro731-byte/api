@@ -21,6 +21,9 @@ const LOCAL_AI_URL = (process.env.LOCAL_AI_URL || "http://127.0.0.1:11434/v1").r
 const LOCAL_IMAGE_URL = process.env.LOCAL_IMAGE_URL || "";
 const LOCAL_VIDEO_URL = process.env.LOCAL_VIDEO_URL || "";
 const LOCAL_MUSIC_URL = process.env.LOCAL_MUSIC_URL || "";
+const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY || "";
+const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID || "";
+const RUNPOD_BASE_URL = "https://api.runpod.ai/v2";
 const OPENAI_URL = "https://api.openai.com/v1";
 const startedAt = Date.now();
 const rateBuckets = new Map();
@@ -481,18 +484,18 @@ app.post("/image", async (req, res) => {
 });
 
 app.get("/v1/video/capabilities", (_req, res) => res.json({
-  self_hosted: Boolean(LOCAL_VIDEO_URL),
-  endpoint_configured: Boolean(LOCAL_VIDEO_URL),
-  mode: LOCAL_VIDEO_URL ? "self-hosted" : "provider",
+  self_hosted: Boolean(LOCAL_VIDEO_URL) || Boolean(RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID),
+  endpoint_configured: Boolean(LOCAL_VIDEO_URL) || Boolean(RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID),
+  mode: LOCAL_VIDEO_URL ? "self-hosted" : (RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID ? "runpod" : "provider"),
   supported_durations: LOCAL_VIDEO_URL ? [5, 10, 15, 30, 60] : [4, 8, 12],
-  max_duration_seconds: LOCAL_VIDEO_URL ? 60 : 12,
-  image_to_video: Boolean(LOCAL_VIDEO_URL),
-  controls: LOCAL_VIDEO_URL
+  max_duration_seconds: LOCAL_VIDEO_URL || (RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID) ? 60 : 12,
+  image_to_video: Boolean(LOCAL_VIDEO_URL || (RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID)),
+  controls: LOCAL_VIDEO_URL || (RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID)
     ? ["negative_prompt", "seed", "steps", "guidance", "style", "camera", "motion", "quality", "image_url"]
     : [],
   note: LOCAL_VIDEO_URL
     ? "Requests are forwarded to your own video-generation server. The server/model defines the actual generation quality."
-    : "Configure LOCAL_VIDEO_URL for longer, self-hosted generation and advanced controls."
+    : RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID ? "Requests are sent to a RunPod serverless GPU endpoint." : "Configure LOCAL_VIDEO_URL or RunPod credentials for advanced generation."
 }));
 
 app.post("/video", async (req, res) => {
@@ -517,6 +520,40 @@ app.post("/video", async (req, res) => {
     ? Math.min(Math.max(Number.isFinite(requestedSeconds) ? requestedSeconds : 8, 5), 60)
     : ([4, 8, 12].includes(requestedSeconds) ? requestedSeconds : 8);
   try {
+    if (!LOCAL_VIDEO_URL && RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID) {
+      const upstream = await fetchWithRetry(
+        RUNPOD_BASE_URL + "/" + encodeURIComponent(RUNPOD_ENDPOINT_ID) + "/runsync",
+        {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + RUNPOD_API_KEY,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            input: {
+              prompt: prompt.trim(),
+              model,
+              seconds: validSeconds,
+              width: size === "1280x720" ? 1280 : size === "1024x1024" ? 1024 : 720,
+              height: size === "1280x720" ? 720 : size === "1024x1024" ? 1024 : 1280,
+              ...(typeof negative_prompt === "string" ? { negative_prompt } : {}),
+              ...(seed !== undefined && Number.isFinite(Number(seed)) ? { seed: Number(seed) } : {}),
+              ...(steps !== undefined && Number.isFinite(Number(steps)) ? { steps: Number(steps) } : {}),
+              ...(guidance !== undefined && Number.isFinite(Number(guidance)) ? { guidance: Number(guidance) } : {}),
+              ...(typeof style === "string" ? { style } : {}),
+              ...(typeof camera === "string" ? { camera } : {}),
+              ...(typeof motion === "string" ? { motion } : {}),
+              ...(typeof quality === "string" ? { quality } : {}),
+              ...(typeof image_url === "string" && image_url ? { image_url } : {})
+            }
+          })
+        }
+      );
+      const data = await readJson(upstream);
+      if (!upstream.ok) return fail(res, upstream.status, "RunPod video generation failed", data?.error || data);
+      return res.status(202).json({ provider: "runpod", ...data });
+    }
+
     if (LOCAL_VIDEO_URL) {
       const upstream = await fetchWithRetry(LOCAL_VIDEO_URL, {
         method: "POST",

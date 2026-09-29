@@ -686,3 +686,100 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => console.log(`Veylola AI API v2 listening on ${PORT}`));
+
+
+// Groq video controller: Groq plans the video request, while Veylola's /video
+// endpoint performs the actual rendering through RunPod, a self-hosted server,
+// or the configured video provider.
+const GROQ_VIDEO_TOOL = {
+  type: "function",
+  function: {
+    name: "generate_video",
+    description: "Generate a video using Veylola's video backend. Use this when the user asks to create, render, or generate a video.",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "Detailed visual prompt for the video." },
+        seconds: { type: "number", enum: [4, 5, 8, 10, 12, 15, 30, 60], description: "Video duration in seconds." },
+        size: { type: "string", enum: ["720x1280", "1280x720", "1024x1024"], description: "Output size; use 720x1280 for vertical 9:16." },
+        style: { type: "string", description: "Visual style." },
+        camera: { type: "string", description: "Camera movement or shot type." },
+        motion: { type: "string", description: "Subject/environment motion." },
+        negative_prompt: { type: "string", description: "Things to avoid in the generated video." },
+        quality: { type: "string", enum: ["draft", "standard", "high"], description: "Requested generation quality." },
+        seed: { type: "number", description: "Optional seed for reproducibility." },
+        steps: { type: "number", description: "Optional inference steps." },
+        guidance: { type: "number", description: "Optional guidance scale." },
+        image_url: { type: "string", description: "Optional public image URL for image-to-video." }
+      },
+      required: ["prompt", "seconds", "size"]
+    }
+  }
+};
+
+app.get("/v1/groq-api/video-control/capabilities", (_req, res) => res.json({
+  provider: "groq",
+  controller_model: GROQ_MODEL,
+  tool: "generate_video",
+  controls: ["prompt", "seconds", "size", "style", "camera", "motion", "negative_prompt", "quality", "seed", "steps", "guidance", "image_url"],
+  renderer: LOCAL_VIDEO_URL ? "self-hosted" : (RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID ? "runpod" : "provider"),
+  configured: Boolean(LOCAL_VIDEO_URL || (RUNPOD_API_KEY && RUNPOD_ENDPOINT_ID) || process.env.OPENAI_API_KEY)
+}));
+
+app.post("/v1/groq-api/video-control", async (req, res) => {
+  const body = req.body || {};
+  const userPrompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  if (!userPrompt) return fail(res, 400, "prompt is required");
+
+  try {
+    const planner = await groq("/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({
+        model: body.model || GROQ_MODEL,
+        temperature: 0.2,
+        tool_choice: { type: "function", function: { name: "generate_video" } },
+        messages: [
+          {
+            role: "system",
+            content: "You are Veylola's video director. Convert the user's request into one precise generate_video tool call. Preserve requested details. If duration is not specified, use 8 seconds. If aspect ratio is not specified, use 720x1280 for mobile/vertical requests and 1280x720 otherwise. Do not invent image URLs."
+          },
+          { role: "user", content: userPrompt }
+        ],
+        tools: [GROQ_VIDEO_TOOL]
+      })
+    });
+
+    const planned = await readJson(planner);
+    if (!planner.ok) return fail(res, planner.status, "Groq video planning failed", planned?.error?.message || planned);
+
+    const toolCall = planned?.choices?.[0]?.message?.tool_calls?.find(
+      call => call.type === "function" && call.function?.name === "generate_video"
+    );
+    if (!toolCall) return fail(res, 502, "Groq did not return a video generation command");
+
+    let videoArgs;
+    try { videoArgs = JSON.parse(toolCall.function.arguments || "{}"); }
+    catch { return fail(res, 502, "Groq returned invalid video arguments"); }
+
+    const videoResponse = await fetch(`http://127.0.0.1:${PORT}/video`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(process.env.VEYLOLA_API_KEY ? { "x-veylola-api-key": process.env.VEYLOLA_API_KEY } : {})
+      },
+      body: JSON.stringify(videoArgs)
+    });
+    const videoData = await readJson(videoResponse);
+    if (!videoResponse.ok) return fail(res, videoResponse.status, "Video renderer failed", videoData?.error || videoData);
+
+    return res.status(videoResponse.status).json({
+      controller: "groq",
+      controller_model: planned.model || GROQ_MODEL,
+      command: videoArgs,
+      video: videoData
+    });
+  } catch (e) {
+    console.error(e);
+    return fail(res, e.status || 500, e.message || "Groq video controller error");
+  }
+});

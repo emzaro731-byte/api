@@ -1,79 +1,62 @@
 # Veylola AI API
 
-Render-ready Node.js API for the Veylola AI mobile app.
+ChatGPT-like backend for the Veylola Android app, hosted on Render.
 
-## Endpoints
+## Core API
 
-Base URL after Render deployment:
+- GET /health
+- GET /v1/capabilities
+- POST /chat
+- POST /v1/responses
+- POST /v1/files
+- POST /v1/vector-stores
+- POST /v1/vector-stores/:id/files
+- POST /image
+- POST /video
+- POST /music
 
-`https://YOUR-SERVICE.onrender.com`
+## Chat / Responses
 
-- GET `/health`
-- POST `/chat`
-- POST `/image`
-- POST `/video`
-- POST `/music`
+POST /v1/responses:
 
-## Render
+{
+  "input": "Explain quantum computing simply",
+  "web_search": true,
+  "stream": false
+}
 
-Create a Render Web Service from this GitHub repository.
+For multimodal input, send OpenAI Responses API input content objects in `input`.
 
-Build command:
+Use `previous_response_id` for multi-turn context. The API can also use OpenAI-hosted conversation state through stored Responses.
 
-`npm install`
+## Web search
 
-Start command:
+Set `web_search: true`. Veylola adds OpenAI's built-in web_search tool.
 
-`npm start`
+## Files and knowledge
 
-Health check:
-
-`/health`
-
-Required environment variables:
-
-`OPENAI_API_KEY`
-`AI_MODEL=gpt-5.6`
-
-Optional music provider:
-
-`MUSIC_API_URL`
-`MUSIC_API_KEY`
-
-Never put provider API keys in the Veylola Android app.
-
-## Chat request
-
-```json
-{"message":"Hello"}
-```
-
-Optional conversation continuation:
-
-```json
-{"message":"Continue","previous_response_id":"response-id"}
-```
-
-## Image request
-
-```json
-{"prompt":"A cinematic futuristic city at night","size":"1024x1024","quality":"high"}
-```
-
-## Video request
-
-```json
-{"prompt":"A cinematic vertical shot of a futuristic Nigerian city at night","seconds":8,"size":"720x1280"}
-```
-
-## Music request
-
-```json
-{"prompt":"Modern Nigerian Afrobeats with warm bass and melodic guitar","duration":30}
-```
-
-Music uses the configured licensed provider adapter.
+1. Upload a file with multipart/form-data to /v1/files using field `file`.
+2. Create a vector store with /v1/vector-stores.
+3. Add uploaded file IDs to the vector store.
+4. Call /v1/responses with `vector_store_ids: ["vs_..."]`.
 
 ## Security
 
-For a public production API, add authentication, rate limiting, quotas, logging and abuse protection before opening it to unrestricted traffic.
+Set `VEYLOLA_API_KEY` in Render to require the Android app to authenticate. Keep `OPENAI_API_KEY` server-side only.
+
+A simple in-memory rate limiter is enabled. For multi-instance production deployments, replace it with Redis or another shared store.
+
+## Render
+
+Build: `npm install`
+Start: `npm start`
+Health check: `/health`
+
+Environment variables:
+
+- OPENAI_API_KEY
+- AI_MODEL
+- VEYLOLA_API_KEY
+- RATE_LIMIT_PER_MINUTE
+- MUSIC_API_URL
+- MUSIC_API_KEY

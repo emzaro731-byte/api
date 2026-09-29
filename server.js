@@ -25,6 +25,8 @@ const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY || "";
 const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID || "";
 const RUNPOD_BASE_URL = "https://api.runpod.ai/v2";
 const OPENAI_URL = "https://api.openai.com/v1";
+const GROQ_URL = "https://api.groq.com/openai/v1";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 const startedAt = Date.now();
 const rateBuckets = new Map();
 
@@ -98,6 +100,19 @@ function localMessages(input) {
     return JSON.stringify(item);
   }).join("\n");
   return [{ role: "user", content: text }];
+}
+
+async function groq(path, options = {}) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw Object.assign(new Error("GROQ_API_KEY is not configured"), { status: 500 });
+  return fetchWithRetry(GROQ_URL + path, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
 }
 
 async function openai(path, options = {}) {
@@ -292,6 +307,54 @@ async function handleResponse(req, res) {
   }
 }
 
+
+app.get("/v1/groq-api/capabilities", (_req, res) => res.json({
+  provider: "groq",
+  model: GROQ_MODEL,
+  chat: true,
+  responses_api: true,
+  multimodal_input: true,
+  reasoning: true,
+  web_search: ["openai/gpt-oss-20b", "openai/gpt-oss-120b"].includes(GROQ_MODEL),
+  code_execution: ["openai/gpt-oss-20b", "openai/gpt-oss-120b"].includes(GROQ_MODEL),
+  note: "Groq is an inference provider. The model runs on Groq; it is not GPT-5.6."
+}));
+
+app.post("/v1/groq-api/responses", async (req, res) => {
+  const body = req.body || {};
+  const input = buildInput(body.message, body.input);
+  if (!input) return fail(res, 400, "message or input is required");
+
+  const payload = {
+    model: body.model || GROQ_MODEL,
+    input,
+    ...(body.instructions ? { instructions: String(body.instructions) } : {}),
+    ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}),
+    ...(Array.isArray(body.tools) && body.tools.length ? { tools: body.tools } : {})
+  };
+
+  try {
+    const upstream = await groq("/responses", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "Groq request failed", data?.error?.message || data);
+    return res.json({
+      id: data.id,
+      object: "veylola.groq.response",
+      created_at: data.created_at,
+      model: data.model || GROQ_MODEL,
+      response: data.output_text || "",
+      output: data.output || [],
+      usage: data.usage || null,
+      status: data.status || "completed"
+    });
+  } catch (e) {
+    console.error(e);
+    return fail(res, e.status || 500, e.message || "Groq server error");
+  }
+});
 
 const XAI_URL = "https://api.x.ai/v1";
 const GROK_MODEL = process.env.GROK_MODEL || "grok-4.7";

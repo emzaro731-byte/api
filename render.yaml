@@ -19,7 +19,7 @@ services:
       - key: VEYLOLA_API_KEY
         sync: false
       - key: RATE_LIMIT_PER_MINUTE
-        value: "30"
+        value: "0"
       - key: MUSIC_API_URL
         sync: false
       - key: MUSIC_API_KEY

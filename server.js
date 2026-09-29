@@ -15,7 +15,9 @@ app.use((req, res, next) => {
 });
 
 const PORT = Number(process.env.PORT || 10000);
-const AI_MODEL = process.env.AI_MODEL || "gpt-5.6";
+const AI_PROVIDER = (process.env.AI_PROVIDER || "auto").toLowerCase();
+const AI_MODEL = process.env.AI_MODEL || "llama3.2";
+const LOCAL_AI_URL = (process.env.LOCAL_AI_URL || "http://127.0.0.1:11434/v1").replace(/\/$/, "");
 const OPENAI_URL = "https://api.openai.com/v1";
 const startedAt = Date.now();
 const rateBuckets = new Map();
@@ -71,6 +73,27 @@ async function fetchWithRetry(url, options = {}, attempts = 4) {
   return lastResponse;
 }
 
+async function localAI(path, options = {}) {
+  return fetchWithRetry(LOCAL_AI_URL + path, options);
+}
+
+function useLocalAI() {
+  if (AI_PROVIDER === "local") return true;
+  if (AI_PROVIDER === "openai") return false;
+  return Boolean(process.env.LOCAL_AI_URL);
+}
+
+function localMessages(input) {
+  if (typeof input === "string") return [{ role: "user", content: input }];
+  if (!Array.isArray(input)) return [{ role: "user", content: String(input ?? "") }];
+  const text = input.map(item => {
+    if (typeof item === "string") return item;
+    if (item?.content) return typeof item.content === "string" ? item.content : JSON.stringify(item.content);
+    return JSON.stringify(item);
+  }).join("\n");
+  return [{ role: "user", content: text }];
+}
+
 async function openai(path, options = {}) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw Object.assign(new Error("OPENAI_API_KEY is not configured"), { status: 500 });
@@ -124,20 +147,35 @@ app.get("/", (_req, res) => res.json({
   name: "Veylola AI API",
   status: "ok",
   version: "2.0.0",
+  provider: useLocalAI() ? "local" : "openai",
   model: AI_MODEL,
-  capabilities: ["chat", "streaming", "web_search", "file_search", "vision", "image_generation", "video_generation", "music"]
+  capabilities: ["chat", "streaming", "vision", "image_generation", "video_generation", "music", ...(useLocalAI() ? [] : ["web_search", "file_search"])]
 }));
 
 app.get("/health", (_req, res) => res.json({
   status: "healthy",
   uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
+  provider: useLocalAI() ? "local" : "openai",
   model: AI_MODEL
 }));
+
+app.get("/v1/local/status", async (_req, res) => {
+  if (!useLocalAI()) return res.json({ enabled: false, provider: "openai", model: AI_MODEL });
+  try {
+    const upstream = await localAI("/models", { method: "GET" });
+    const data = await readJson(upstream);
+    if (!upstream.ok) return res.status(503).json({ enabled: true, reachable: false, error: data?.error || data });
+    return res.json({ enabled: true, reachable: true, provider: "local", model: AI_MODEL, models: data.models || [] });
+  } catch (e) {
+    return res.status(503).json({ enabled: true, reachable: false, error: e.message });
+  }
+});
 
 app.get("/v1/capabilities", (_req, res) => res.json({
   chat: true,
   streaming: true,
-  web_search: true,
+  provider: useLocalAI() ? "local" : "openai",
+  web_search: !useLocalAI(),
   file_search: true,
   multimodal_input: true,
   image_generation: true,
@@ -169,6 +207,52 @@ async function handleResponse(req, res) {
   };
 
   try {
+    if (useLocalAI()) {
+      const upstream = await localAI("/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: body.model || AI_MODEL,
+          messages: localMessages(input),
+          ...(body.temperature !== undefined ? { temperature: Number(body.temperature) } : {}),
+          ...(body.max_output_tokens ? { max_tokens: Number(body.max_output_tokens) } : {}),
+          ...(body.stream ? { stream: true } : {})
+        })
+      });
+
+      if (body.stream) {
+        res.status(upstream.status);
+        res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        if (!upstream.body) return res.end();
+        const reader = upstream.body.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(Buffer.from(value));
+          }
+        } finally {
+          res.end();
+        }
+        return;
+      }
+
+      const local = await readJson(upstream);
+      if (!upstream.ok) return fail(res, upstream.status, "Local AI request failed", local?.error?.message || local);
+      return res.json({
+        id: local.id || crypto.randomUUID(),
+        object: "veylola.response",
+        created_at: Math.floor(Date.now() / 1000),
+        model: local.model || AI_MODEL,
+        response: local.choices?.[0]?.message?.content || "",
+        output: local.choices?.[0] ? [{ type: "message", content: [{ type: "output_text", text: local.choices[0].message.content || "" }] }] : [],
+        usage: local.usage || null,
+        status: "completed"
+      });
+    }
+
     const upstream = await openai("/responses", {
       method: "POST",
       body: JSON.stringify({ ...payload, ...(body.stream ? { stream: true } : {}) })

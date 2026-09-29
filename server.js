@@ -1,74 +1,262 @@
 import express from "express";
+import multer from "multer";
+import crypto from "node:crypto";
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+app.use(express.json({ limit: "8mb" }));
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "content-type, authorization");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type, authorization, x-veylola-api-key");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
   next();
 });
 
 const PORT = Number(process.env.PORT || 10000);
 const AI_MODEL = process.env.AI_MODEL || "gpt-5.6";
-const fail = (res, status, error, details) => res.status(status).json({ error, ...(details ? { details } : {}) });
+const OPENAI_URL = "https://api.openai.com/v1";
+const startedAt = Date.now();
+const rateBuckets = new Map();
 
-app.get("/", (_req, res) => res.json({ name: "Veylola AI API", status: "ok", model: AI_MODEL }));
-app.get("/health", (_req, res) => res.json({ status: "healthy" }));
+function fail(res, status, error, details) {
+  return res.status(status).json({ error, ...(details ? { details } : {}) });
+}
+
+function getClientKey(req) {
+  return req.get("x-veylola-api-key") || req.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
+}
+
+function guard(req, res, next) {
+  const configured = process.env.VEYLOLA_API_KEY;
+  if (configured && getClientKey(req) !== configured) {
+    return fail(res, 401, "Invalid Veylola API key");
+  }
+
+  const key = configured ? getClientKey(req) : (req.ip || "anonymous");
+  const now = Date.now();
+  const windowMs = 60_000;
+  const limit = Number(process.env.RATE_LIMIT_PER_MINUTE || 30);
+  const bucket = rateBuckets.get(key) || { start: now, count: 0 };
+  if (now - bucket.start >= windowMs) {
+    bucket.start = now;
+    bucket.count = 0;
+  }
+  bucket.count += 1;
+  rateBuckets.set(key, bucket);
+  if (bucket.count > limit) {
+    res.setHeader("Retry-After", "60");
+    return fail(res, 429, "Rate limit exceeded");
+  }
+  next();
+}
+
+app.use(guard);
+
+async function openai(path, options = {}) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw Object.assign(new Error("OPENAI_API_KEY is not configured"), { status: 500 });
+  const response = await fetch(OPENAI_URL + path, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${key}`,
+      ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      ...(options.headers || {})
+    }
+  });
+  return response;
+}
+
+async function readJson(response) {
+  const text = await response.text();
+  try { return JSON.parse(text); } catch { return { raw: text }; }
+}
+
+function responsePayload(data) {
+  return {
+    id: data.id,
+    object: "veylola.response",
+    created_at: data.created_at,
+    model: data.model || AI_MODEL,
+    response: data.output_text || "",
+    output: data.output || [],
+    usage: data.usage || null,
+    status: data.status || "completed"
+  };
+}
+
+function buildInput(message, input) {
+  if (Array.isArray(input)) return input;
+  if (typeof input === "string" && input.trim()) return input.trim();
+  if (typeof message === "string" && message.trim()) return message.trim();
+  return null;
+}
+
+function buildTools(body) {
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  if (body.web_search === true) {
+    tools.push({ type: "web_search", search_context_size: body.search_context_size || "medium" });
+  }
+  if (Array.isArray(body.vector_store_ids) && body.vector_store_ids.length) {
+    tools.push({ type: "file_search", vector_store_ids: body.vector_store_ids });
+  }
+  return tools;
+}
+
+app.get("/", (_req, res) => res.json({
+  name: "Veylola AI API",
+  status: "ok",
+  version: "2.0.0",
+  model: AI_MODEL,
+  capabilities: ["chat", "streaming", "web_search", "file_search", "vision", "image_generation", "video_generation", "music"]
+}));
+
+app.get("/health", (_req, res) => res.json({
+  status: "healthy",
+  uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
+  model: AI_MODEL
+}));
+
+app.get("/v1/capabilities", (_req, res) => res.json({
+  chat: true,
+  streaming: true,
+  web_search: true,
+  file_search: true,
+  multimodal_input: true,
+  image_generation: true,
+  video_generation: true,
+  music_generation: Boolean(process.env.MUSIC_API_URL && process.env.MUSIC_API_KEY)
+}));
 
 app.post("/chat", async (req, res) => {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) return fail(res, 500, "OPENAI_API_KEY is not configured");
-  const { message, previous_response_id } = req.body ?? {};
-  if (typeof message !== "string" || !message.trim()) return fail(res, 400, "message must be a non-empty string");
+  req.body = { ...req.body, web_search: req.body?.web_search ?? false };
+  return handleResponse(req, res);
+});
+
+app.post("/v1/responses", handleResponse);
+
+async function handleResponse(req, res) {
+  const body = req.body ?? {};
+  const input = buildInput(body.message, body.input);
+  if (!input) return fail(res, 400, "message or input is required");
+
   const payload = {
-    model: AI_MODEL,
-    input: [
-      { role: "developer", content: "You are Veylola AI, a capable general-purpose AI assistant. Be accurate, helpful, clear and honest about limitations." },
-      { role: "user", content: message.trim() }
-    ],
-    store: true
+    model: body.model || AI_MODEL,
+    input,
+    store: body.store !== false,
+    ...(body.instructions ? { instructions: String(body.instructions) } : {}),
+    ...(body.previous_response_id ? { previous_response_id: String(body.previous_response_id) } : {}),
+    ...(body.temperature !== undefined ? { temperature: Number(body.temperature) } : {}),
+    ...(body.max_output_tokens ? { max_output_tokens: Number(body.max_output_tokens) } : {}),
+    ...(buildTools(body).length ? { tools: buildTools(body) } : {})
   };
-  if (typeof previous_response_id === "string" && previous_response_id.trim()) payload.previous_response_id = previous_response_id.trim();
+
   try {
-    const upstream = await fetch("https://api.openai.com/v1/responses", {
+    const upstream = await openai("/responses", {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ ...payload, ...(body.stream ? { stream: true } : {}) })
     });
-    const data = await upstream.json();
-    if (!upstream.ok) return fail(res, upstream.status, "AI provider request failed", data?.error?.message || "Unknown provider error");
-    return res.json({ id: data.id, response: data.output_text || "", model: data.model || AI_MODEL });
+
+    if (body.stream) {
+      res.status(upstream.status);
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      if (!upstream.body) return res.end();
+      const reader = upstream.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(Buffer.from(value));
+        }
+      } finally {
+        res.end();
+      }
+      return;
+    }
+
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "AI provider request failed", data?.error?.message || data);
+    return res.json(responsePayload(data));
   } catch (e) {
     console.error(e);
-    return fail(res, 500, "Server error");
+    return fail(res, e.status || 500, e.message || "Server error");
+  }
+}
+
+app.post("/v1/files", upload.single("file"), async (req, res) => {
+  if (!req.file) return fail(res, 400, "file is required");
+  try {
+    const form = new FormData();
+    form.append("purpose", req.body.purpose || "assistants");
+    form.append("file", new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname);
+    const upstream = await openai("/files", { method: "POST", body: form });
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "File upload failed", data?.error?.message || data);
+    return res.status(upstream.status).json(data);
+  } catch (e) {
+    console.error(e);
+    return fail(res, e.status || 500, e.message || "File upload failed");
+  }
+});
+
+app.post("/v1/vector-stores", async (req, res) => {
+  try {
+    const upstream = await openai("/vector_stores", {
+      method: "POST",
+      body: JSON.stringify({
+        name: req.body?.name || "Veylola Knowledge Base",
+        ...(req.body?.description ? { description: req.body.description } : {}),
+        ...(Array.isArray(req.body?.file_ids) ? { file_ids: req.body.file_ids } : {})
+      })
+    });
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "Vector store creation failed", data?.error?.message || data);
+    return res.status(upstream.status).json(data);
+  } catch (e) {
+    return fail(res, e.status || 500, e.message || "Vector store creation failed");
+  }
+});
+
+app.post("/v1/vector-stores/:id/files", async (req, res) => {
+  const { file_id, attributes } = req.body || {};
+  if (!file_id) return fail(res, 400, "file_id is required");
+  try {
+    const upstream = await openai(`/vector_stores/${encodeURIComponent(req.params.id)}/files`, {
+      method: "POST",
+      body: JSON.stringify({ file_id, ...(attributes ? { attributes } : {}) })
+    });
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "Adding file to vector store failed", data?.error?.message || data);
+    return res.status(upstream.status).json(data);
+  } catch (e) {
+    return fail(res, e.status || 500, e.message || "Vector store request failed");
   }
 });
 
 app.post("/image", async (req, res) => {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) return fail(res, 500, "OPENAI_API_KEY is not configured");
   const { prompt, model = "gpt-image-2", size = "1024x1024", quality = "high", n = 1 } = req.body ?? {};
   if (typeof prompt !== "string" || !prompt.trim()) return fail(res, 400, "prompt is required");
   try {
-    const upstream = await fetch("https://api.openai.com/v1/images/generations", {
+    const upstream = await openai("/images/generations", {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, prompt: prompt.trim(), size, quality, n: Math.min(Math.max(Number(n) || 1, 1), 4) })
+      body: JSON.stringify({
+        model, prompt: prompt.trim(), size, quality,
+        n: Math.min(Math.max(Number(n) || 1, 1), 4)
+      })
     });
-    const data = await upstream.json();
-    if (!upstream.ok) return fail(res, upstream.status, "Image generation failed", data?.error?.message);
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "Image generation failed", data?.error?.message || data);
     return res.json({ data: data.data || [], model, quality });
   } catch (e) {
     console.error(e);
-    return fail(res, 500, "Server error");
+    return fail(res, e.status || 500, e.message || "Server error");
   }
 });
 
 app.post("/video", async (req, res) => {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) return fail(res, 500, "OPENAI_API_KEY is not configured");
   const { prompt, model = "sora-2", seconds = 8, size = "720x1280" } = req.body ?? {};
   if (typeof prompt !== "string" || !prompt.trim()) return fail(res, 400, "prompt is required");
   const validSeconds = [4, 8, 12].includes(Number(seconds)) ? Number(seconds) : 8;
@@ -78,9 +266,13 @@ app.post("/video", async (req, res) => {
     form.append("prompt", prompt.trim());
     form.append("seconds", String(validSeconds));
     form.append("size", size);
-    const upstream = await fetch("https://api.openai.com/v1/videos", { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: form });
-    const data = await upstream.json();
-    if (!upstream.ok) return fail(res, upstream.status, "Video generation failed", data?.error?.message);
+    const upstream = await fetch(OPENAI_URL + "/videos", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY || ""}` },
+      body: form
+    });
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "Video generation failed", data?.error?.message || data);
     return res.status(202).json(data);
   } catch (e) {
     console.error(e);
@@ -90,7 +282,7 @@ app.post("/video", async (req, res) => {
 
 app.post("/music", async (req, res) => {
   const base = process.env.MUSIC_API_URL, key = process.env.MUSIC_API_KEY;
-  if (!base || !key) return fail(res, 500, "MUSIC_API_URL and MUSIC_API_KEY must be configured");
+  if (!base || !key) return fail(res, 503, "Music provider is not configured");
   if (typeof req.body?.prompt !== "string" || !req.body.prompt.trim()) return fail(res, 400, "prompt is required");
   try {
     const upstream = await fetch(base, {
@@ -98,8 +290,8 @@ app.post("/music", async (req, res) => {
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify(req.body)
     });
-    const data = await upstream.json();
-    if (!upstream.ok) return fail(res, upstream.status, "Music generation failed", data?.error?.message);
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "Music generation failed", data?.error?.message || data);
     return res.status(202).json(data);
   } catch (e) {
     console.error(e);
@@ -107,4 +299,9 @@ app.post("/music", async (req, res) => {
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => console.log(`Veylola AI API listening on ${PORT}`));
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  return fail(res, err.status || 500, err.message || "Unexpected server error");
+});
+
+app.listen(PORT, "0.0.0.0", () => console.log(`Veylola AI API v2 listening on ${PORT}`));

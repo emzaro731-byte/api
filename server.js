@@ -186,6 +186,118 @@ async function handleResponse(req, res) {
   }
 }
 
+
+const XAI_URL = "https://api.x.ai/v1";
+const GROK_MODEL = process.env.GROK_MODEL || "grok-4.7";
+
+async function xai(path, options = {}) {
+  const key = process.env.XAI_API_KEY;
+  if (!key) throw Object.assign(new Error("XAI_API_KEY is not configured"), { status: 500 });
+  return fetch(XAI_URL + path, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+}
+
+function grokTools(body) {
+  const tools = Array.isArray(body.tools) ? [...body.tools] : [];
+  if (body.web_search !== false) tools.push({ type: "web_search" });
+  if (body.x_search === true) tools.push({ type: "x_search" });
+  if (body.code_execution === true) tools.push({ type: "code_interpreter" });
+  if (Array.isArray(body.vector_store_ids) && body.vector_store_ids.length) {
+    tools.push({ type: "file_search", vector_store_ids: body.vector_store_ids });
+  }
+  return tools;
+}
+
+function grokPayload(body) {
+  const input = buildInput(body.message, body.input);
+  if (!input) return null;
+  return {
+    model: body.model || GROK_MODEL,
+    input,
+    store: body.store !== false,
+    ...(body.instructions ? { instructions: String(body.instructions) } : {}),
+    ...(body.previous_response_id ? { previous_response_id: String(body.previous_response_id) } : {}),
+    ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}),
+    ...(body.prompt_cache_key ? { prompt_cache_key: String(body.prompt_cache_key) } : {}),
+    ...(grokTools(body).length ? { tools: grokTools(body) } : {})
+  };
+}
+
+app.get("/v1/grok/capabilities", (_req, res) => res.json({
+  model: GROK_MODEL,
+  chat: true,
+  reasoning: true,
+  web_search: true,
+  x_search: true,
+  code_execution: true,
+  file_search: true,
+  citations: true,
+  streaming: true
+}));
+
+app.post("/v1/grok/responses", async (req, res) => {
+  const body = req.body || {};
+  const payload = grokPayload(body);
+  if (!payload) return fail(res, 400, "message or input is required");
+
+  try {
+    const upstream = await xai("/responses", {
+      method: "POST",
+      body: JSON.stringify({ ...payload, ...(body.stream ? { stream: true } : {}) })
+    });
+
+    if (body.stream) {
+      res.status(upstream.status);
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      if (!upstream.body) return res.end();
+      const reader = upstream.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(Buffer.from(value));
+        }
+      } finally {
+        res.end();
+      }
+      return;
+    }
+
+    const data = await readJson(upstream);
+    if (!upstream.ok) return fail(res, upstream.status, "Grok request failed", data?.error?.message || data);
+
+    const citations = [];
+    for (const item of data.output || []) {
+      for (const part of item.content || []) {
+        if (part.type === "source" && part.url) citations.push(part.url);
+      }
+    }
+
+    return res.json({
+      id: data.id,
+      object: "veylola.grok.response",
+      created_at: data.created_at,
+      model: data.model || GROK_MODEL,
+      response: data.output_text || "",
+      output: data.output || [],
+      citations: [...new Set(citations)],
+      usage: data.usage || null,
+      status: data.status || "completed"
+    });
+  } catch (e) {
+    console.error(e);
+    return fail(res, e.status || 500, e.message || "Grok server error");
+  }
+});
+
 app.post("/v1/files", upload.single("file"), async (req, res) => {
   if (!req.file) return fail(res, 400, "file is required");
   try {

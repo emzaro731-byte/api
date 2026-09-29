@@ -10,13 +10,23 @@ services:
     envVars:
       - key: AI_MODEL
         value: gpt-5.6
+      - key: AI_PROVIDER
+        value: openai
       - key: GROK_MODEL
         value: grok-4.7
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
       - key: OPENAI_API_KEY
         sync: false
       - key: XAI_API_KEY
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
       - key: VEYLOLA_API_KEY
+        sync: false
+      - key: RUNPOD_API_KEY
+        sync: false
+      - key: RUNPOD_ENDPOINT_ID
         sync: false
       - key: RATE_LIMIT_PER_MINUTE
         value: "0"

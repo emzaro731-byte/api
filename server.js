@@ -37,7 +37,9 @@ function guard(req, res, next) {
   const key = configured ? getClientKey(req) : (req.ip || "anonymous");
   const now = Date.now();
   const windowMs = 60_000;
-  const limit = Number(process.env.RATE_LIMIT_PER_MINUTE || 30);
+  const limit = Number(process.env.RATE_LIMIT_PER_MINUTE ?? 0);
+  // 0 disables Veylola's app-side request cap. Provider limits still apply.
+  if (limit <= 0) return next();
   const bucket = rateBuckets.get(key) || { start: now, count: 0 };
   if (now - bucket.start >= windowMs) {
     bucket.start = now;
@@ -54,10 +56,25 @@ function guard(req, res, next) {
 
 app.use(guard);
 
+async function fetchWithRetry(url, options = {}, attempts = 4) {
+  let lastResponse;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const response = await fetch(url, options);
+    if (response.status !== 429 || attempt === attempts - 1) return response;
+    lastResponse = response;
+    const retryAfter = Number(response.headers.get("retry-after"));
+    const delay = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 30000)
+      : Math.min(1000 * (2 ** attempt), 8000);
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  return lastResponse;
+}
+
 async function openai(path, options = {}) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw Object.assign(new Error("OPENAI_API_KEY is not configured"), { status: 500 });
-  const response = await fetch(OPENAI_URL + path, {
+  return fetchWithRetry(OPENAI_URL + path, {
     ...options,
     headers: {
       Authorization: `Bearer ${key}`,
@@ -65,7 +82,6 @@ async function openai(path, options = {}) {
       ...(options.headers || {})
     }
   });
-  return response;
 }
 
 async function readJson(response) {
@@ -193,7 +209,7 @@ const GROK_MODEL = process.env.GROK_MODEL || "grok-4.7";
 async function xai(path, options = {}) {
   const key = process.env.XAI_API_KEY;
   if (!key) throw Object.assign(new Error("XAI_API_KEY is not configured"), { status: 500 });
-  return fetch(XAI_URL + path, {
+  return fetchWithRetry(XAI_URL + path, {
     ...options,
     headers: {
       Authorization: `Bearer ${key}`,

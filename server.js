@@ -484,16 +484,38 @@ app.get("/v1/video/capabilities", (_req, res) => res.json({
   self_hosted: Boolean(LOCAL_VIDEO_URL),
   endpoint_configured: Boolean(LOCAL_VIDEO_URL),
   mode: LOCAL_VIDEO_URL ? "self-hosted" : "provider",
-  supported_durations: [4, 8, 12],
+  supported_durations: LOCAL_VIDEO_URL ? [5, 10, 15, 30, 60] : [4, 8, 12],
+  max_duration_seconds: LOCAL_VIDEO_URL ? 60 : 12,
+  image_to_video: Boolean(LOCAL_VIDEO_URL),
+  controls: LOCAL_VIDEO_URL
+    ? ["negative_prompt", "seed", "steps", "guidance", "style", "camera", "motion", "quality", "image_url"]
+    : [],
   note: LOCAL_VIDEO_URL
-    ? "Requests are forwarded to your own video-generation server."
-    : "Configure LOCAL_VIDEO_URL to use a self-hosted video-generation server."
+    ? "Requests are forwarded to your own video-generation server. The server/model defines the actual generation quality."
+    : "Configure LOCAL_VIDEO_URL for longer, self-hosted generation and advanced controls."
 }));
 
 app.post("/video", async (req, res) => {
-  const { prompt, model = "sora-2", seconds = 8, size = "720x1280" } = req.body ?? {};
+  const {
+    prompt,
+    model = "sora-2",
+    seconds = 8,
+    size = "720x1280",
+    negative_prompt,
+    seed,
+    steps,
+    guidance,
+    style,
+    camera,
+    motion,
+    quality,
+    image_url
+  } = req.body ?? {};
   if (typeof prompt !== "string" || !prompt.trim()) return fail(res, 400, "prompt is required");
-  const validSeconds = [4, 8, 12].includes(Number(seconds)) ? Number(seconds) : 8;
+  const requestedSeconds = Number(seconds);
+  const validSeconds = LOCAL_VIDEO_URL
+    ? Math.min(Math.max(Number.isFinite(requestedSeconds) ? requestedSeconds : 8, 5), 60)
+    : ([4, 8, 12].includes(requestedSeconds) ? requestedSeconds : 8);
   try {
     if (LOCAL_VIDEO_URL) {
       const upstream = await fetchWithRetry(LOCAL_VIDEO_URL, {
@@ -508,7 +530,15 @@ app.post("/video", async (req, res) => {
           ...(req.body?.seed !== undefined ? { seed: Number(req.body.seed) } : {}),
           ...(req.body?.steps !== undefined ? { steps: Number(req.body.steps) } : {}),
           ...(req.body?.guidance !== undefined ? { guidance: Number(req.body.guidance) } : {}),
-          ...(req.body?.image_url ? { image_url: String(req.body.image_url) } : {})
+          ...(typeof negative_prompt === "string" ? { negative_prompt } : {}),
+          ...(seed !== undefined && Number.isFinite(Number(seed)) ? { seed: Number(seed) } : {}),
+          ...(steps !== undefined && Number.isFinite(Number(steps)) ? { steps: Number(steps) } : {}),
+          ...(guidance !== undefined && Number.isFinite(Number(guidance)) ? { guidance: Number(guidance) } : {}),
+          ...(typeof style === "string" ? { style } : {}),
+          ...(typeof camera === "string" ? { camera } : {}),
+          ...(typeof motion === "string" ? { motion } : {}),
+          ...(typeof quality === "string" ? { quality } : {}),
+          ...(typeof image_url === "string" && image_url ? { image_url } : {})
         })
       });
       const data = await readJson(upstream);

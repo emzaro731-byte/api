@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 
 const PORT = Number(process.env.PORT || 10000);
 const AI_PROVIDER = (process.env.AI_PROVIDER || "auto").toLowerCase();
-const AI_MODEL = process.env.AI_MODEL || "llama3.2";
+const AI_MODEL = process.env.AI_MODEL || "gpt-5.6";
 const LOCAL_AI_URL = (process.env.LOCAL_AI_URL || "http://127.0.0.1:11434/v1").replace(/\/$/, "");
 const LOCAL_IMAGE_URL = process.env.LOCAL_IMAGE_URL || "";
 const LOCAL_VIDEO_URL = process.env.LOCAL_VIDEO_URL || "";

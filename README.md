@@ -75,3 +75,24 @@ Set `VEYLOLA_API_KEY` before exposing the API publicly. Never put model-provider
 ## Render
 
 Render can host the API routing layer, but a normal free web service is not a free GPU server. For genuinely self-hosted inference, run the model server on your own computer or another machine with suitable hardware and point `LOCAL_AI_URL` at it.
+
+
+## Self-hosted video generation
+
+Set `LOCAL_VIDEO_URL` to an HTTP endpoint running your own video-generation model:
+
+```env
+LOCAL_VIDEO_URL=http://YOUR_VIDEO_SERVER:8188/veylola/generate
+```
+
+The Veylola API sends JSON containing `prompt`, `model`, `seconds`, `size`, and optional `negative_prompt`, `seed`, `steps`, `guidance`, and `image_url`.
+
+The endpoint should return JSON. It may return a queued job such as:
+
+```json
+{"id":"job-123","status":"queued"}
+```
+
+Veylola exposes `GET /v1/video/capabilities` so the Android app can detect whether the self-hosted video engine is configured.
+
+This makes the API an adapter around your own video model; the model itself still needs to run on a machine with suitable GPU/CPU resources.

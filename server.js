@@ -18,6 +18,9 @@ const PORT = Number(process.env.PORT || 10000);
 const AI_PROVIDER = (process.env.AI_PROVIDER || "auto").toLowerCase();
 const AI_MODEL = process.env.AI_MODEL || "llama3.2";
 const LOCAL_AI_URL = (process.env.LOCAL_AI_URL || "http://127.0.0.1:11434/v1").replace(/\/$/, "");
+const LOCAL_IMAGE_URL = process.env.LOCAL_IMAGE_URL || "";
+const LOCAL_VIDEO_URL = process.env.LOCAL_VIDEO_URL || "";
+const LOCAL_MUSIC_URL = process.env.LOCAL_MUSIC_URL || "";
 const OPENAI_URL = "https://api.openai.com/v1";
 const startedAt = Date.now();
 const rateBuckets = new Map();
@@ -401,6 +404,15 @@ app.post("/v1/grok/responses", async (req, res) => {
 app.post("/v1/files", upload.single("file"), async (req, res) => {
   if (!req.file) return fail(res, 400, "file is required");
   try {
+    if (LOCAL_VIDEO_URL) {
+      const upstream = await fetchWithRetry(LOCAL_VIDEO_URL, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: prompt.trim(), model, seconds: validSeconds, size })
+      });
+      const data = await readJson(upstream);
+      if (!upstream.ok) return fail(res, upstream.status, "Local video generation failed", data?.error?.message || data);
+      return res.status(upstream.status).json(data);
+    }
     const form = new FormData();
     form.append("purpose", req.body.purpose || "assistants");
     form.append("file", new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname);
@@ -452,6 +464,15 @@ app.post("/image", async (req, res) => {
   const { prompt, model = "gpt-image-2", size = "1024x1024", quality = "high", n = 1 } = req.body ?? {};
   if (typeof prompt !== "string" || !prompt.trim()) return fail(res, 400, "prompt is required");
   try {
+    if (LOCAL_IMAGE_URL) {
+      const upstream = await fetchWithRetry(LOCAL_IMAGE_URL, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: prompt.trim(), model, size, quality, n })
+      });
+      const data = await readJson(upstream);
+      if (!upstream.ok) return fail(res, upstream.status, "Local image generation failed", data?.error?.message || data);
+      return res.json(data);
+    }
     const upstream = await openai("/images/generations", {
       method: "POST",
       body: JSON.stringify({
@@ -494,10 +515,14 @@ app.post("/video", async (req, res) => {
 
 app.post("/music", async (req, res) => {
   const base = process.env.MUSIC_API_URL, key = process.env.MUSIC_API_KEY;
-  if (!base || !key) return fail(res, 503, "Music provider is not configured");
+  if (!LOCAL_MUSIC_URL && (!base || !key)) return fail(res, 503, "Music provider is not configured");
   if (typeof req.body?.prompt !== "string" || !req.body.prompt.trim()) return fail(res, 400, "prompt is required");
   try {
-    const upstream = await fetch(base, {
+    const upstream = await fetchWithRetry(LOCAL_MUSIC_URL || base, {
+      method: "POST",
+      headers: LOCAL_MUSIC_URL ? { "Content-Type": "application/json" } : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify(req.body)
+    });
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify(req.body)

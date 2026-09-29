@@ -404,15 +404,6 @@ app.post("/v1/grok/responses", async (req, res) => {
 app.post("/v1/files", upload.single("file"), async (req, res) => {
   if (!req.file) return fail(res, 400, "file is required");
   try {
-    if (LOCAL_VIDEO_URL) {
-      const upstream = await fetchWithRetry(LOCAL_VIDEO_URL, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: prompt.trim(), model, seconds: validSeconds, size })
-      });
-      const data = await readJson(upstream);
-      if (!upstream.ok) return fail(res, upstream.status, "Local video generation failed", data?.error?.message || data);
-      return res.status(upstream.status).json(data);
-    }
     const form = new FormData();
     form.append("purpose", req.body.purpose || "assistants");
     form.append("file", new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname);
@@ -489,6 +480,16 @@ app.post("/image", async (req, res) => {
   }
 });
 
+app.get("/v1/video/capabilities", (_req, res) => res.json({
+  self_hosted: Boolean(LOCAL_VIDEO_URL),
+  endpoint_configured: Boolean(LOCAL_VIDEO_URL),
+  mode: LOCAL_VIDEO_URL ? "self-hosted" : "provider",
+  supported_durations: [4, 8, 12],
+  note: LOCAL_VIDEO_URL
+    ? "Requests are forwarded to your own video-generation server."
+    : "Configure LOCAL_VIDEO_URL to use a self-hosted video-generation server."
+}));
+
 app.post("/video", async (req, res) => {
   const { prompt, model = "sora-2", seconds = 8, size = "720x1280" } = req.body ?? {};
   if (typeof prompt !== "string" || !prompt.trim()) return fail(res, 400, "prompt is required");
@@ -498,11 +499,21 @@ app.post("/video", async (req, res) => {
       const upstream = await fetchWithRetry(LOCAL_VIDEO_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: prompt.trim(), model, seconds: validSeconds, size })
+        body: JSON.stringify({
+          prompt: prompt.trim(),
+          model,
+          seconds: validSeconds,
+          size,
+          ...(typeof req.body?.negative_prompt === "string" ? { negative_prompt: req.body.negative_prompt } : {}),
+          ...(req.body?.seed !== undefined ? { seed: Number(req.body.seed) } : {}),
+          ...(req.body?.steps !== undefined ? { steps: Number(req.body.steps) } : {}),
+          ...(req.body?.guidance !== undefined ? { guidance: Number(req.body.guidance) } : {}),
+          ...(req.body?.image_url ? { image_url: String(req.body.image_url) } : {})
+        })
       });
       const data = await readJson(upstream);
       if (!upstream.ok) return fail(res, upstream.status, "Local video generation failed", data?.error?.message || data);
-      return res.status(upstream.status).json(data);
+      return res.status(upstream.status === 200 ? 202 : upstream.status).json(data);
     }
     const form = new FormData();
     form.append("model", model);
